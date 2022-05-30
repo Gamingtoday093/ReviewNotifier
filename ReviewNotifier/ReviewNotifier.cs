@@ -10,10 +10,11 @@ using ReviewNotifier.Models;
 using System.Net;
 using Newtonsoft.Json;
 using System.Threading;
-using Rocket.Core.Utils;
 using Rocket.Core;
-using Rocket.API;
 using Rocket.API.Collections;
+using System.IO;
+using Dir = System.IO.Directory;
+using SDG.Framework.Modules;
 
 namespace ReviewNotifier
 {
@@ -21,11 +22,13 @@ namespace ReviewNotifier
     {
         public static ReviewNotifier Instance { get; private set; }
         public static ReviewNotifierConfiguration Config { get; private set; }
+        public static bool RunningOpenMod => ModuleHook.modules.Any(m => m.config.Name == "OpenMod.Unturned" && m.status == EModuleStatus.Initialized);
         protected override void Load()
         {
             Instance = this;
             Config = Configuration.Instance;
 
+            if (RunningOpenMod) Logger.LogWarning("ReviewNotifier Only has Partial Support for OpenMod!");
             Logger.Log($"{Name} {Assembly.GetName().Version} by Gamingtoday093 has been Loaded");
 
             if (Level.isLoaded) DisplayReviews(0);
@@ -43,13 +46,13 @@ namespace ReviewNotifier
             ThreadPool.QueueUserWorkItem(async (_) =>
             {
                 List<DisplayProduct> Displayproducts = await GetDisplayProducts();
-                List<IRocketPlugin> RocketPlugins = R.Plugins.GetPlugins();
+                List<string> Plugins = await GetPluginNames();
 
                 foreach (DisplayProduct displayProduct in Displayproducts)
                 {
                     if (displayProduct.seller.name == Config.UsernameOrSteamId || Config.UsernameOrSteamId == displayProduct.seller.steamId) continue;
                     if (Config.IgnoreProductIDs.Any(p => p == displayProduct.id)) continue;
-                    if (!Config.ProductIDs.Any(p => p == displayProduct.id) && !RocketPlugins.Any(p => FuzzySearch(p.Name, displayProduct.name))) continue;
+                    if (!Config.ProductIDs.Any(p => p == displayProduct.id) && !Plugins.Any(pluginName => FuzzySearch(pluginName, displayProduct.name))) continue;
                     bool isReviewed = await IsReviewed(displayProduct.id);
                     if (isReviewed) continue;
                     SendNotReviewedMessage(displayProduct);
@@ -57,6 +60,61 @@ namespace ReviewNotifier
 
                 LogMessage("ReviewNotifier >> All Products have been Searched!");
             });
+        }
+
+        public async Task<List<string>> GetPluginNames()
+        {
+            // Server Directory
+            string ServerDirectory = Path.GetDirectoryName(System.Environment.CurrentDirectory);
+
+            // Rocket Plugins
+            List<string> Plugins = R.Plugins.GetPlugins().Select(p => p.Name).ToList();
+
+            // OpenMod
+            // Would Ideally use Loaded OpenMod Plugins but that seems to be impossible to get if youre not using a OpenMod Plugin (Hours Wasted: 11h)
+            if (RunningOpenMod)
+            {
+                // Plugins Folder
+                string OpenModPluginsDirectory = Path.Combine(ServerDirectory, "OpenMod", "plugins");
+                if (Dir.Exists(OpenModPluginsDirectory))
+                    foreach (string file in Dir.GetFiles(OpenModPluginsDirectory, "*.dll", SearchOption.TopDirectoryOnly))
+                        Plugins.Add(Path.GetFileNameWithoutExtension(file));
+
+                // Packages Folder
+                string[] IgnorePackages = new string[]
+                {
+                    "OpenMod.UnityEngine",
+                    "OpenMod.Unturned"
+                };
+
+                string OpenModPackagesPath = Path.Combine(ServerDirectory, "OpenMod", "packages", "packages.yaml");
+                if (File.Exists(OpenModPackagesPath))
+                {
+                    string[] dataText;
+                    using (StreamReader stream = File.OpenText(OpenModPackagesPath))
+                    {
+                        dataText = (await stream.ReadToEndAsync()).Split(new[] { System.Environment.NewLine },
+                                     StringSplitOptions.RemoveEmptyEntries); ;
+                    }
+
+                    foreach (string line in dataText)
+                    {
+                        if (!line.Contains("- id: ")) continue;
+                        string packageId = line.Substring(line.IndexOf("- id: ") + 6);
+                        if (IgnorePackages.Contains(packageId)) continue;
+                        Plugins.Add(packageId);
+                    }
+                }
+            }
+
+            // UScript 2
+            // Using Directories and Not Modules Because Scripts dont have an Assembly
+            string UScript2Directory = Path.Combine(ServerDirectory, "uScript", "Scripts");
+            if (Dir.Exists(UScript2Directory))
+                foreach (string file in Dir.GetFiles(UScript2Directory, "*.uscript", SearchOption.AllDirectories))
+                    Plugins.Add(Path.GetFileNameWithoutExtension(file));
+
+            return Plugins;
         }
 
         public bool FuzzySearch(string input, string target)
@@ -107,7 +165,7 @@ namespace ReviewNotifier
             LogMessage(Translate("NotReviewed", Name, displayProduct.name, displayProduct.id, displayProduct.seller.name), ConsoleColor.DarkCyan);
         }
 
-        public void LogMessage(object message, ConsoleColor consoleColor = ConsoleColor.Gray)
+        public void LogMessage<T>(T message, ConsoleColor consoleColor = ConsoleColor.Gray)
         {
             Console.ForegroundColor = consoleColor;
             Console.WriteLine(message);
